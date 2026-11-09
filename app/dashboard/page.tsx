@@ -2,6 +2,8 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
+import { supabase } from "@/lib/supabase";
 
 type RoadmapStep = {
   title: string;
@@ -25,13 +27,7 @@ type Analysis = {
 };
 
 type Activity = {
-  id: string;
-  type:
-    | "task_completed"
-    | "task_reopened"
-    | "step_completed"
-    | "step_reopened";
-  title: string;
+  type: string;
   description: string;
   timestamp: string;
 };
@@ -42,12 +38,9 @@ type Profile = {
   skills: string;
   interest: string;
   analysis: Analysis | null;
-  completedSteps: string[];
-  completedTasks: Record<string, string[]>;
-  activityHistory: Activity[];  
+  completedTasks: Record<string, boolean>;
+  activityHistory: Activity[];
 };
-
-const STORAGE_KEY = "devpath-ai-profile";
 
 const defaultProfile: Profile = {
   level: "Beginner",
@@ -55,167 +48,193 @@ const defaultProfile: Profile = {
   skills: "",
   interest: "Web Development",
   analysis: null,
-  completedSteps: [],
   completedTasks: {},
   activityHistory: [],
 };
 
+function getTaskKey(stepIndex: number, taskIndex: number) {
+  return `${stepIndex}-${taskIndex}`;
+}
+
 export default function DashboardPage() {
+  const router = useRouter();
+
   const [profile, setProfile] = useState<Profile>(defaultProfile);
-  const [loaded, setLoaded] = useState(false);
-  const [expandedSteps, setExpandedSteps] = useState<string[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [userEmail, setUserEmail] = useState("");
 
   useEffect(() => {
+    loadProfile();
+  }, []);
+
+  async function loadProfile() {
     try {
-      const savedProfile = localStorage.getItem(STORAGE_KEY);
+      const {
+        data: { user },
+        error: authError,
+      } = await supabase.auth.getUser();
 
-      if (savedProfile) {
-        const parsed = JSON.parse(savedProfile);
+      if (authError || !user) {
+        router.replace("/login");
+        return;
+      }
 
+      setUserEmail(user.email ?? "");
+
+      const { data, error } = await supabase
+        .from("profiles")
+        .select("*")
+        .eq("id", user.id)
+        .maybeSingle();
+
+      if (error) {
+        console.error("Profile loading error:", error);
+        return;
+      }
+
+      if (data) {
         setProfile({
-          ...defaultProfile,
-          ...parsed,
-          completedSteps: Array.isArray(parsed.completedSteps)
-            ? parsed.completedSteps
-            : [],
-          completedTasks:
-            parsed.completedTasks &&
-            typeof parsed.completedTasks === "object"
-              ? parsed.completedTasks
-              : {},
-          activityHistory: Array.isArray(parsed.activityHistory)
-          ? parsed.activityHistory
-          : [],
+          level: data.level ?? "Beginner",
+          goal: data.goal ?? "Get a job",
+          skills: data.skills ?? "",
+          interest: data.interest ?? "Web Development",
+          analysis: data.analysis ?? null,
+          completedTasks: data.completed_tasks ?? {},
+          activityHistory: data.activity_history ?? [],
         });
       }
     } catch (error) {
-      console.error("Could not load dashboard profile:", error);
+      console.error("Dashboard error:", error);
     } finally {
-      setLoaded(true);
+      setLoading(false);
     }
-  }, []);
+  }
 
-  const analysis = profile.analysis;
-  const roadmap = analysis?.roadmap ?? [];
-  const projects = analysis?.projects ?? [];
+  async function saveProfile(updatedProfile: Profile) {
+    setSaving(true);
 
-  const totalSteps = roadmap.length;
+    try {
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
 
-  const completedCount = roadmap.filter((step) =>
-    profile.completedSteps.includes(step.title)
-  ).length;
+      if (!user) {
+        router.replace("/login");
+        return;
+      }
 
-  const progress =
-    totalSteps > 0
-      ? Math.round((completedCount / totalSteps) * 100)
-      : 0;
+      const { error } = await supabase
+        .from("profiles")
+        .update({
+          level: updatedProfile.level,
+          goal: updatedProfile.goal,
+          skills: updatedProfile.skills,
+          interest: updatedProfile.interest,
+          analysis: updatedProfile.analysis,
+          completed_tasks: updatedProfile.completedTasks,
+          activity_history: updatedProfile.activityHistory,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", user.id);
 
-  const userSkills = analysis?.userSkills ?? [];
-  const missingSkills = analysis?.missingSkills ?? [];
+      if (error) {
+        console.error("Profile saving error:", error);
+      }
+    } catch (error) {
+      console.error("Saving error:", error);
+    } finally {
+      setSaving(false);
+    }
+  }
 
-  const toggleExpandedStep = (stepTitle: string) => {
-    setExpandedSteps((current) =>
-      current.includes(stepTitle)
-        ? current.filter((title) => title !== stepTitle)
-        : [...current, stepTitle]
-    );
-  };
+  async function toggleTask(
+    stepIndex: number,
+    taskIndex: number,
+    taskTitle: string
+  ) {
+    const key = getTaskKey(stepIndex, taskIndex);
+    const isCompleted = Boolean(profile.completedTasks[key]);
 
-  const toggleTask = (stepTitle: string, taskTitle: string) => {
-  setProfile((current) => {
-    const currentTasks = current.completedTasks || {};
-    const stepTasks = currentTasks[stepTitle] || [];
-
-    const isTaskCompleted = stepTasks.includes(taskTitle);
-
-    const updatedTasks = isTaskCompleted
-      ? stepTasks.filter((task) => task !== taskTitle)
-      : [...stepTasks, taskTitle];
-
-    const updatedCompletedTasks = {
-      ...currentTasks,
-      [stepTitle]: updatedTasks,
+    const updatedTasks = {
+      ...profile.completedTasks,
+      [key]: !isCompleted,
     };
 
-    const roadmapStep = current.analysis?.roadmap.find(
-      (step) => step.title === stepTitle
-    );
+    const newActivity: Activity = {
+      type: isCompleted ? "reopened" : "completed",
+      description: isCompleted
+        ? `Reopened task: ${taskTitle}`
+        : `Completed task: ${taskTitle}`,
+      timestamp: new Date().toISOString(),
+    };
 
-    const allTasksCompleted =
-      !!roadmapStep &&
-      roadmapStep.tasks.length > 0 &&
-      roadmapStep.tasks.every((task) =>
-        updatedTasks.includes(task)
-      );
-
-    const wasStepCompleted =
-      current.completedSteps.includes(stepTitle);
-
-    const updatedCompletedSteps = allTasksCompleted
-      ? Array.from(
-          new Set([...current.completedSteps, stepTitle])
-        )
-      : current.completedSteps.filter(
-          (title) => title !== stepTitle
-        );
-
-    const newActivities: Activity[] = [
-      {
-        id: `${Date.now()}-task`,
-        type: isTaskCompleted
-          ? "task_reopened"
-          : "task_completed",
-        title: isTaskCompleted
-          ? "Task reopened"
-          : "Task completed",
-        description: `${taskTitle} — ${stepTitle}`,
-        timestamp: new Date().toISOString(),
-      },
-    ];
-
-    if (allTasksCompleted && !wasStepCompleted) {
-      newActivities.push({
-        id: `${Date.now()}-step`,
-        type: "step_completed",
-        title: "Roadmap step completed",
-        description: stepTitle,
-        timestamp: new Date().toISOString(),
-      });
-    }
-
-    if (!allTasksCompleted && wasStepCompleted) {
-      newActivities.push({
-        id: `${Date.now()}-step-reopened`,
-        type: "step_reopened",
-        title: "Roadmap step reopened",
-        description: stepTitle,
-        timestamp: new Date().toISOString(),
-      });
-    }
-
-    const updatedProfile = {
-      ...current,
-      completedTasks: updatedCompletedTasks,
-      completedSteps: updatedCompletedSteps,
+    const updatedProfile: Profile = {
+      ...profile,
+      completedTasks: updatedTasks,
       activityHistory: [
-        ...newActivities,
-        ...(current.activityHistory || []),
+        newActivity,
+        ...profile.activityHistory,
       ].slice(0, 30),
     };
 
-    localStorage.setItem(
-      STORAGE_KEY,
-      JSON.stringify(updatedProfile)
-    );
+    setProfile(updatedProfile);
+    await saveProfile(updatedProfile);
+  }
 
-    return updatedProfile;
-  });
-};
+  async function handleLogout() {
+    await supabase.auth.signOut();
+    router.replace("/login");
+  }
 
-  if (!loaded) {
+  const roadmap = profile.analysis?.roadmap ?? [];
+  const projects = profile.analysis?.projects ?? [];
+
+  const totalTasks = roadmap.reduce(
+    (total, step) => total + (step.tasks?.length ?? 0),
+    0
+  );
+
+  const completedTaskCount = roadmap.reduce(
+    (total, step, stepIndex) =>
+      total +
+      (step.tasks?.filter(
+        (_, taskIndex) =>
+          profile.completedTasks[
+            getTaskKey(stepIndex, taskIndex)
+          ]
+      ).length ?? 0),
+    0
+  );
+
+  const overallProgress =
+    totalTasks > 0
+      ? Math.round((completedTaskCount / totalTasks) * 100)
+      : 0;
+
+  const completedSteps = roadmap.filter(
+    (step, stepIndex) =>
+      step.tasks.length > 0 &&
+      step.tasks.every(
+        (_, taskIndex) =>
+          profile.completedTasks[
+            getTaskKey(stepIndex, taskIndex)
+          ]
+      )
+  ).length;
+
+  const skills = profile.skills
+    .split(/[,;\n]+/)
+    .map((skill) => skill.trim())
+    .filter(Boolean);
+
+  if (loading) {
     return (
       <main className="flex min-h-screen items-center justify-center bg-[#09090f] text-white">
-        <p className="text-gray-400">Loading dashboard...</p>
+        <div className="text-center">
+          <div className="mx-auto mb-4 h-10 w-10 animate-spin rounded-full border-4 border-violet-500 border-t-transparent" />
+          <p className="text-gray-400">Loading your dashboard...</p>
+        </div>
       </main>
     );
   }
@@ -223,482 +242,505 @@ export default function DashboardPage() {
   return (
     <main className="min-h-screen bg-[#09090f] text-white">
       <div className="flex min-h-screen">
-        <aside className="hidden w-64 shrink-0 border-r border-white/10 bg-[#0d0d15] p-6 lg:block">
-          <Link href="/" className="text-2xl font-bold">
+
+        {/* SIDEBAR */}
+
+        <aside className="hidden w-64 shrink-0 border-r border-white/10 bg-[#0d0d16] p-6 md:flex md:flex-col">
+          <Link href="/" className="mb-12 text-2xl font-bold">
             DevPath<span className="text-violet-400"> AI</span>
           </Link>
 
-          <p className="mt-2 text-xs text-gray-500">
-            Your AI career companion
-          </p>
-
-          <nav className="mt-12 space-y-2">
-            <a
-              href="#overview"
-              className="block rounded-xl bg-violet-500/10 px-4 py-3 text-sm font-medium text-violet-300"
-            >
-              Overview
-            </a>
-
-            <a
-              href="#roadmap"
-              className="block rounded-xl px-4 py-3 text-sm text-gray-400 transition hover:bg-white/5 hover:text-white"
-            >
-              Learning Roadmap
-            </a>
-            <section id="activity" className="mt-12">
-  <div>
-    <p className="text-sm text-violet-400">
-      Your Recent Actions
-    </p>
-
-    <h2 className="mt-1 text-2xl font-bold">
-      Activity History
-    </h2>
-
-    <p className="mt-2 text-sm text-gray-500">
-      Keep track of your learning journey.
-    </p>
-  </div>
-
-  <div className="mt-6 rounded-2xl border border-white/10 bg-[#11111a] p-6">
-    {profile.activityHistory.length > 0 ? (
-      <div className="space-y-5">
-        {profile.activityHistory.map((activity) => {
-          const isCompleted =
-            activity.type === "task_completed" ||
-            activity.type === "step_completed";
-
-          return (
-            <div
-              key={activity.id}
-              className="flex gap-4"
-            >
-              <div
-                className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-full ${
-                  isCompleted
-                    ? "bg-emerald-500/10 text-emerald-400"
-                    : "bg-amber-500/10 text-amber-400"
-                }`}
+          <nav className="flex-1 space-y-2">
+            {[
+              ["Overview", "#overview"],
+              ["Progress", "#progress"],
+              ["Learning Roadmap", "#roadmap"],
+              ["My Skills", "#skills"],
+              ["Projects", "#projects"],
+              ["Activity History", "#activity"],
+            ].map(([label, href]) => (
+              <a
+                key={href}
+                href={href}
+                className="block rounded-xl px-4 py-3 text-gray-400 transition hover:bg-white/5 hover:text-white"
               >
-                {isCompleted ? "✓" : "↺"}
-              </div>
-
-              <div className="min-w-0 flex-1">
-                <h3 className="text-sm font-semibold text-white">
-                  {activity.title}
-                </h3>
-
-                <p className="mt-1 break-words text-sm text-gray-400">
-                  {activity.description}
-                </p>
-
-                <p className="mt-2 text-xs text-gray-600">
-                  {new Date(activity.timestamp).toLocaleString()}
-                </p>
-              </div>
-            </div>
-          );
-        })}
-      </div>
-    ) : (
-      <div className="py-8 text-center">
-        <div className="text-3xl">📋</div>
-
-                <h3 className="mt-3 font-semibold">
-                No activities yet
-                </h3>
-
-                <p className="mt-2 text-sm text-gray-500">
-                    Complete your first roadmap task to see your activity here.
-                </p>
-                </div>
-                )}
-            </div>
-            </section>
-            <a
-              href="#skills"
-              className="block rounded-xl px-4 py-3 text-sm text-gray-400 transition hover:bg-white/5 hover:text-white"
-            >
-              My Skills
-            </a>
-
-            <a
-              href="#projects"
-              className="block rounded-xl px-4 py-3 text-sm text-gray-400 transition hover:bg-white/5 hover:text-white"
-            >
-              Projects
-            </a>
-
-            <Link
-              href="/analyze"
-              className="block rounded-xl px-4 py-3 text-sm text-gray-400 transition hover:bg-white/5 hover:text-white"
-            >
-              New Analysis
-            </Link>
+                {label}
+              </a>
+            ))}
           </nav>
 
-          <div className="mt-16 rounded-xl border border-violet-500/20 bg-violet-500/5 p-4">
-            <p className="text-sm font-semibold text-violet-300">
-              Keep Learning
+          <div className="border-t border-white/10 pt-6">
+            <p className="mb-3 truncate text-xs text-gray-500">
+              {userEmail}
             </p>
 
-            <p className="mt-2 text-xs leading-5 text-gray-400">
-              Small steps every day can move you closer to your career goals.
-            </p>
+            <button
+              onClick={handleLogout}
+              className="w-full rounded-xl px-4 py-3 text-left text-sm text-red-400 transition hover:bg-red-500/10"
+            >
+              Log out
+            </button>
           </div>
         </aside>
 
-        <section className="min-w-0 flex-1 px-5 py-7 sm:px-8 lg:px-10">
+        {/* MAIN CONTENT */}
+
+        <div className="min-w-0 flex-1 px-5 py-8 sm:px-8 lg:px-12">
+
+          {/* HEADER */}
+
           <header
             id="overview"
-            className="flex flex-col justify-between gap-5 border-b border-white/10 pb-7 sm:flex-row sm:items-center"
+            className="mb-10 flex flex-wrap items-center justify-between gap-4"
           >
             <div>
-              <p className="text-sm text-violet-400">
-                Personal Dashboard
+              <p className="mb-2 text-sm text-violet-400">
+                YOUR DEVELOPER SPACE
               </p>
 
-              <h1 className="mt-2 text-3xl font-bold tracking-tight">
-                Welcome back!
-              </h1>
+              <div className="flex items-center justify-between">
+                <h1 className="text-3xl font-bold">
+                Dashboard
+                </h1>
+
+                <Link
+                  href="/settings"
+                  className="rounded-xl border border-white/10 bg-white/5 px-4 py-2 text-sm font-medium text-gray-300 transition hover:border-violet-500/50 hover:bg-violet-500/10 hover:text-white"
+                >
+                ⚙ Settings
+                </Link>
+              </div>
 
               <p className="mt-2 text-sm text-gray-400">
-                Track your learning progress and build your future.
+                Track your learning journey and keep growing.
               </p>
             </div>
 
-            <Link
-              href="/analyze"
-              className="inline-flex items-center justify-center rounded-xl bg-violet-600 px-5 py-3 text-sm font-semibold transition hover:bg-violet-500"
-            >
-              New Skill Analysis
-            </Link>
+            <div className="flex items-center gap-3">
+              <span className="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-xs text-gray-300">
+                {saving ? "Saving..." : "Changes saved"}
+              </span>
+
+              <Link
+                href="/analyze"
+                className="rounded-xl bg-violet-600 px-5 py-3 text-sm font-semibold transition hover:bg-violet-500"
+              >
+                New Analysis
+              </Link>
+            </div>
           </header>
 
-          <section className="mt-8 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+          {/* WELCOME */}
+
+          <section className="mb-8 overflow-hidden rounded-3xl border border-violet-500/20 bg-gradient-to-br from-violet-600/20 via-[#171326] to-[#11111b] p-7 sm:p-9">
+            <span className="rounded-full border border-violet-400/30 bg-violet-400/10 px-3 py-1 text-xs text-violet-300">
+              Your personal learning space
+            </span>
+
+            <h2 className="mt-5 text-2xl font-bold sm:text-3xl">
+              Keep moving forward.
+            </h2>
+
+            <p className="mt-3 max-w-2xl leading-7 text-gray-400">
+              Every completed task brings you closer to your career
+              goals. Stay consistent, build projects, and improve
+              your skills.
+            </p>
+
+            <Link
+              href="/analyze"
+              className="mt-6 inline-flex rounded-xl bg-white px-5 py-3 text-sm font-semibold text-black transition hover:bg-gray-200"
+            >
+              Continue Learning →
+            </Link>
+          </section>
+
+          {/* STATISTICS */}
+
+          <section className="mb-10 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
             <StatCard
-              title="Known Skills"
-              value={userSkills.length}
-              description="Skills you already have"
+              title="Overall Progress"
+              value={`${overallProgress}%`}
+              subtitle="Task completion"
+              icon="📈"
             />
 
             <StatCard
-              title="Skills to Learn"
-              value={missingSkills.length}
-              description="Skills to improve"
+              title="Completed Tasks"
+              value={`${completedTaskCount}`}
+              subtitle={`Out of ${totalTasks} tasks`}
+              icon="✅"
             />
 
             <StatCard
               title="Completed Steps"
-              value={`${completedCount}/${totalSteps}`}
-              description="Roadmap milestones"
+              value={`${completedSteps}`}
+              subtitle={`Out of ${roadmap.length} stages`}
+              icon="📚"
             />
 
             <StatCard
               title="Recommended Projects"
-              value={projects.length}
-              description="Projects to build"
+              value={`${projects.length}`}
+              subtitle="Projects to build"
+              icon="💻"
             />
           </section>
 
-          <section className="mt-8 rounded-2xl border border-violet-500/20 bg-gradient-to-r from-violet-600/15 to-[#171323] p-6 sm:p-8">
-            <div className="flex flex-col justify-between gap-6 md:flex-row md:items-center">
-              <div>
-                <p className="text-sm font-medium text-violet-300">
-                  Your Career Goal
-                </p>
+          {/* PROGRESS CHART */}
 
-                <h2 className="mt-2 text-2xl font-bold">
-                  {profile.goal}
-                </h2>
+          <section
+            id="progress"
+            className="mb-10 grid gap-6 lg:grid-cols-3"
+          >
+            <div className="rounded-3xl border border-white/10 bg-[#11111b] p-6">
+              <h2 className="text-lg font-bold">
+                Overall Progress
+              </h2>
 
-                <p className="mt-2 text-sm text-gray-400">
-                  {profile.interest} · {profile.level} Level
+              <p className="mt-1 text-sm text-gray-500">
+                Based on completed tasks
+              </p>
+
+              <div className="flex flex-col items-center py-8">
+                <div
+                  className="relative flex h-48 w-48 items-center justify-center rounded-full"
+                  style={{
+                    background: `conic-gradient(#8b5cf6 ${overallProgress}%, #272338 ${overallProgress}% 100%)`,
+                  }}
+                >
+                  <div className="flex h-36 w-36 flex-col items-center justify-center rounded-full bg-[#11111b]">
+                    <span className="text-4xl font-bold">
+                      {overallProgress}%
+                    </span>
+
+                    <span className="mt-1 text-xs text-gray-500">
+                      Completed
+                    </span>
+                  </div>
+                </div>
+
+                <p className="mt-6 text-center text-sm text-gray-400">
+                  {completedTaskCount} of {totalTasks} tasks completed.
                 </p>
               </div>
 
-              <div className="w-full md:max-w-xs">
-                <div className="mb-2 flex justify-between text-sm">
-                  <span className="text-gray-400">
-                    Overall Progress
-                  </span>
+              <div className="flex items-center justify-center gap-6 text-xs text-gray-400">
+                <span className="flex items-center gap-2">
+                  <span className="h-2.5 w-2.5 rounded-full bg-violet-500" />
+                  Completed
+                </span>
 
-                  <span className="font-semibold text-violet-300">
-                    {progress}%
-                  </span>
-                </div>
-
-                <div className="h-3 overflow-hidden rounded-full bg-white/10">
-                  <div
-                    className="h-full rounded-full bg-violet-500 transition-all duration-500"
-                    style={{ width: `${progress}%` }}
-                  />
-                </div>
-
-                <p className="mt-2 text-xs text-gray-500">
-                  {completedCount} of {totalSteps} steps completed
-                </p>
+                <span className="flex items-center gap-2">
+                  <span className="h-2.5 w-2.5 rounded-full bg-[#272338]" />
+                  Remaining
+                </span>
               </div>
+            </div>
+
+            {/* STEP PROGRESS */}
+
+            <div className="rounded-3xl border border-white/10 bg-[#11111b] p-6 lg:col-span-2">
+              <h2 className="text-lg font-bold">
+                Progress by Learning Stage
+              </h2>
+
+              <p className="mb-8 mt-1 text-sm text-gray-500">
+                Complete individual tasks to increase your progress.
+              </p>
+
+              {roadmap.length > 0 ? (
+                <div className="space-y-7">
+                  {roadmap.map((step, stepIndex) => {
+                    const tasks = step.tasks ?? [];
+                    const completed = tasks.filter(
+                      (_, taskIndex) =>
+                        profile.completedTasks[
+                          getTaskKey(stepIndex, taskIndex)
+                        ]
+                    ).length;
+
+                    const percentage =
+                      tasks.length > 0
+                        ? Math.round((completed / tasks.length) * 100)
+                        : 0;
+
+                    return (
+                      <div key={`${step.title}-${stepIndex}`}>
+                        <div className="mb-3 flex items-center justify-between gap-3">
+                          <span className="truncate text-sm font-medium text-gray-200">
+                            {stepIndex + 1}. {step.title}
+                          </span>
+
+                          <span className="shrink-0 text-xs text-violet-300">
+                            {percentage}%
+                          </span>
+                        </div>
+
+                        <div className="h-2.5 overflow-hidden rounded-full bg-white/5">
+                          <div
+                            className="h-full rounded-full bg-violet-500 transition-all duration-500"
+                            style={{ width: `${percentage}%` }}
+                          />
+                        </div>
+
+                        <p className="mt-2 text-xs text-gray-600">
+                          {completed} of {tasks.length} tasks completed
+                        </p>
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                <EmptyState
+                  title="No roadmap yet"
+                  description="Generate your first learning roadmap to see your progress here."
+                  buttonText="Create Roadmap"
+                  href="/analyze"
+                />
+              )}
             </div>
           </section>
 
-          <section id="roadmap" className="mt-10">
-            <div className="flex flex-col justify-between gap-2 sm:flex-row sm:items-end">
-              <div>
-                <p className="text-sm text-violet-400">
-                  Your Learning Journey
-                </p>
+          {/* LEARNING ROADMAP */}
 
-                <h2 className="mt-1 text-2xl font-bold">
+          <section
+            id="roadmap"
+            className="mb-10 rounded-3xl border border-white/10 bg-[#11111b] p-6 sm:p-8"
+          >
+            <div className="mb-7 flex flex-wrap items-center justify-between gap-4">
+              <div>
+                <h2 className="text-xl font-bold">
                   Learning Roadmap
                 </h2>
+
+                <p className="mt-1 text-sm text-gray-500">
+                  Check off individual tasks as you complete them.
+                </p>
               </div>
 
-              <p className="text-sm text-gray-500">
-                Expand a step to see its tasks.
-              </p>
+              <span className="rounded-full bg-violet-500/10 px-4 py-2 text-xs text-violet-300">
+                {completedTaskCount}/{totalTasks} Tasks
+              </span>
             </div>
 
-            {analysis ? (
-              <div className="mt-7 space-y-4">
-                {roadmap.map((step, index) => {
-                  const isExpanded = expandedSteps.includes(step.title);
+            {roadmap.length > 0 ? (
+              <div className="space-y-5">
+                {roadmap.map((step, stepIndex) => {
+                  const tasks = step.tasks ?? [];
 
-                  const completedTasks =
-                    profile.completedTasks?.[step.title] || [];
-
-                  const completedTaskCount = step.tasks.filter(
-                    (task) => completedTasks.includes(task)
+                  const completed = tasks.filter(
+                    (_, taskIndex) =>
+                      profile.completedTasks[
+                        getTaskKey(stepIndex, taskIndex)
+                      ]
                   ).length;
 
-                  const taskProgress =
-                    step.tasks.length > 0
-                      ? Math.round(
-                          (completedTaskCount / step.tasks.length) * 100
-                        )
+                  const percentage =
+                    tasks.length > 0
+                      ? Math.round((completed / tasks.length) * 100)
                       : 0;
-
-                  const completed = profile.completedSteps.includes(
-                    step.title
-                  );
 
                   return (
                     <div
-                      key={`${step.title}-${index}`}
-                      className={`overflow-hidden rounded-xl border transition ${
-                        completed
-                          ? "border-emerald-500/20 bg-emerald-500/5"
-                          : "border-white/10 bg-[#13131d]"
-                      }`}
+                      key={`${step.title}-${stepIndex}`}
+                      className="rounded-2xl border border-white/10 bg-white/[0.02] p-5"
                     >
-                      <button
-                        type="button"
-                        onClick={() => toggleExpandedStep(step.title)}
-                        aria-expanded={isExpanded}
-                        className="flex w-full items-center gap-4 p-5 text-left"
-                      >
-                        <div
-                          className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-sm font-bold ${
-                            completed
-                              ? "bg-emerald-500/20 text-emerald-400"
-                              : "bg-violet-500/10 text-violet-400"
-                          }`}
-                        >
-                          {completed ? "✓" : index + 1}
-                        </div>
+                      <div className="flex flex-wrap items-start justify-between gap-4">
+                        <div className="flex min-w-0 gap-4">
+                          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-violet-500/10 font-bold text-violet-400">
+                            {stepIndex + 1}
+                          </div>
 
-                        <div className="min-w-0 flex-1">
-                          <h3 className="font-semibold text-white">
-                            {step.title}
-                          </h3>
+                          <div className="min-w-0">
+                            <h3 className="font-semibold">
+                              {step.title}
+                            </h3>
 
-                          <p className="mt-1 text-sm text-gray-500">
-                            {step.duration}
-                          </p>
+                            <p className="mt-1 text-sm leading-6 text-gray-400">
+                              {step.description}
+                            </p>
 
-                          <div className="mt-3 flex items-center gap-3">
-                            <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-white/10">
-                              <div
-                                className="h-full rounded-full bg-emerald-400 transition-all"
-                                style={{ width: `${taskProgress}%` }}
-                              />
-                            </div>
-
-                            <span className="text-xs text-gray-400">
-                              {completedTaskCount}/{step.tasks.length} tasks
+                            <span className="mt-3 inline-block text-xs text-violet-300">
+                              Duration: {step.duration}
                             </span>
                           </div>
                         </div>
 
-                        <span className="text-gray-400">
-                          {isExpanded ? "▲" : "▼"}
+                        <span className="rounded-full bg-violet-500/10 px-3 py-2 text-xs text-violet-300">
+                          {percentage}% Complete
                         </span>
-                      </button>
+                      </div>
 
-                      {isExpanded && (
-                        <div className="border-t border-white/10 px-5 pb-5 pt-4">
-                          {step.description && (
-                            <p className="mb-5 text-sm leading-6 text-gray-400">
-                              {step.description}
-                            </p>
-                          )}
+                      {/* INDIVIDUAL TASKS */}
 
-                          <h4 className="mb-3 text-sm font-semibold text-white">
-                            Tasks to complete
-                          </h4>
+                      <div className="mt-6 border-t border-white/10 pt-5">
+                        <div className="mb-4 flex items-center justify-between">
+                          <p className="text-xs font-semibold text-gray-400">
+                            Learning Tasks
+                          </p>
 
-                          <div className="space-y-3">
-                            {step.tasks.map((task, taskIndex) => {
-                              const isTaskCompleted =
-                                completedTasks.includes(task);
-
-                              return (
-                                <label
-                                  key={`${task}-${taskIndex}`}
-                                  className="flex cursor-pointer items-start gap-3 rounded-lg border border-white/5 bg-white/[0.02] p-3 transition hover:bg-white/[0.05]"
-                                >
-                                  <input
-                                    type="checkbox"
-                                    checked={isTaskCompleted}
-                                    onChange={() =>
-                                      toggleTask(step.title, task)
-                                    }
-                                    className="mt-1 h-4 w-4 accent-violet-500"
-                                  />
-
-                                  <span
-                                    className={`text-sm leading-6 ${
-                                      isTaskCompleted
-                                        ? "text-gray-500 line-through"
-                                        : "text-gray-300"
-                                    }`}
-                                  >
-                                    {task}
-                                  </span>
-                                </label>
-                              );
-                            })}
-                          </div>
-
-                          <div className="mt-4 text-xs text-gray-500">
-                            {completed
-                              ? "You have completed this roadmap step!"
-                              : `${taskProgress}% completed`}
-                          </div>
+                          <p className="text-xs text-gray-500">
+                            {completed}/{tasks.length}
+                          </p>
                         </div>
-                      )}
+
+                        <div className="space-y-3">
+                          {tasks.map((task, taskIndex) => {
+                            const key = getTaskKey(
+                              stepIndex,
+                              taskIndex
+                            );
+
+                            const isCompleted = Boolean(
+                              profile.completedTasks[key]
+                            );
+
+                            return (
+                              <label
+                                key={key}
+                                className={`flex cursor-pointer items-start gap-3 rounded-xl border p-4 transition ${
+                                  isCompleted
+                                    ? "border-green-500/20 bg-green-500/5"
+                                    : "border-white/5 bg-white/[0.02] hover:border-violet-500/30"
+                                }`}
+                              >
+                                <input
+                                  type="checkbox"
+                                  checked={isCompleted}
+                                  onChange={() =>
+                                    toggleTask(
+                                      stepIndex,
+                                      taskIndex,
+                                      task
+                                    )
+                                  }
+                                  className="mt-0.5 h-4 w-4 shrink-0 cursor-pointer accent-violet-500"
+                                />
+
+                                <span
+                                  className={`text-sm leading-6 ${
+                                    isCompleted
+                                      ? "text-green-400 line-through"
+                                      : "text-gray-300"
+                                  }`}
+                                >
+                                  {task}
+                                </span>
+                              </label>
+                            );
+                          })}
+                        </div>
+                      </div>
                     </div>
                   );
                 })}
               </div>
             ) : (
               <EmptyState
-                title="No roadmap available yet"
-                description="Generate your skill analysis to get a personalized learning roadmap."
-                buttonText="Create Skill Analysis"
+                title="Your roadmap is waiting"
+                description="Complete your first AI analysis to generate a personalized learning roadmap."
+                buttonText="Generate Roadmap"
                 href="/analyze"
               />
             )}
           </section>
 
-          <section id="skills" className="mt-12 grid gap-6 xl:grid-cols-2">
-            <div className="rounded-2xl border border-white/10 bg-[#11111a] p-6">
-              <p className="text-sm text-violet-400">
-                Your Strengths
+          {/* SKILLS */}
+
+          <section
+            id="skills"
+            className="mb-10 rounded-3xl border border-white/10 bg-[#11111b] p-6 sm:p-8"
+          >
+            <h2 className="text-xl font-bold">
+              My Skills
+            </h2>
+
+            <p className="mb-6 mt-1 text-sm text-gray-500">
+              Skills you currently have
+            </p>
+
+            {skills.length > 0 ? (
+              <div className="flex flex-wrap gap-3">
+                {skills.map((skill, index) => (
+                  <span
+                    key={`${skill}-${index}`}
+                    className="rounded-xl border border-violet-500/20 bg-violet-500/10 px-4 py-2 text-sm text-violet-300"
+                  >
+                    {skill}
+                  </span>
+                ))}
+              </div>
+            ) : (
+              <p className="text-sm text-gray-500">
+                No skills added yet.
               </p>
+            )}
 
-              <h2 className="mt-1 text-xl font-bold">
-                Skills You Have
-              </h2>
+            {profile.analysis?.missingSkills &&
+              profile.analysis.missingSkills.length > 0 && (
+                <div className="mt-8 border-t border-white/10 pt-6">
+                  <h3 className="mb-4 text-sm font-semibold text-gray-300">
+                    Skills to Learn
+                  </h3>
 
-              {userSkills.length > 0 ? (
-                <div className="mt-5 flex flex-wrap gap-2">
-                  {userSkills.map((skill, index) => (
-                    <span
-                      key={`${skill}-${index}`}
-                      className="rounded-lg border border-emerald-500/20 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-300"
-                    >
-                      {skill}
-                    </span>
-                  ))}
+                  <div className="flex flex-wrap gap-3">
+                    {profile.analysis.missingSkills.map(
+                      (skill, index) => (
+                        <span
+                          key={`${skill}-${index}`}
+                          className="rounded-xl border border-orange-500/20 bg-orange-500/10 px-4 py-2 text-sm text-orange-300"
+                        >
+                          {skill}
+                        </span>
+                      )
+                    )}
+                  </div>
                 </div>
-              ) : (
-                <p className="mt-5 text-sm text-gray-500">
-                  Your analyzed skills will appear here.
-                </p>
               )}
-            </div>
-
-            <div className="rounded-2xl border border-white/10 bg-[#11111a] p-6">
-              <p className="text-sm text-violet-400">
-                Growth Opportunities
-              </p>
-
-              <h2 className="mt-1 text-xl font-bold">
-                Skills to Improve
-              </h2>
-
-              {missingSkills.length > 0 ? (
-                <div className="mt-5 flex flex-wrap gap-2">
-                  {missingSkills.map((skill, index) => (
-                    <span
-                      key={`${skill}-${index}`}
-                      className="rounded-lg border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-sm text-amber-300"
-                    >
-                      {skill}
-                    </span>
-                  ))}
-                </div>
-              ) : (
-                <p className="mt-5 text-sm text-gray-500">
-                  Your missing skills will appear after analysis.
-                </p>
-              )}
-            </div>
           </section>
 
-          <section id="projects" className="mt-12 pb-10">
-            <div>
-              <p className="text-sm text-violet-400">
-                Build Your Portfolio
-              </p>
+          {/* PROJECTS */}
 
-              <h2 className="mt-1 text-2xl font-bold">
+          <section id="projects" className="mb-10">
+            <div className="mb-6">
+              <h2 className="text-xl font-bold">
                 Recommended Projects
               </h2>
 
-              <p className="mt-2 text-sm text-gray-500">
-                Practice your skills with projects selected for your career goal.
+              <p className="mt-1 text-sm text-gray-500">
+                Practical projects to improve your portfolio
               </p>
             </div>
 
             {projects.length > 0 ? (
-              <div className="mt-6 grid gap-5 md:grid-cols-2 xl:grid-cols-3">
+              <div className="grid gap-5 md:grid-cols-2 xl:grid-cols-3">
                 {projects.map((project, index) => (
                   <div
                     key={`${project.title}-${index}`}
-                    className="rounded-2xl border border-white/10 bg-[#11111a] p-5 transition hover:-translate-y-1 hover:border-violet-500/30"
+                    className="rounded-3xl border border-white/10 bg-[#11111b] p-6 transition hover:-translate-y-1 hover:border-violet-500/30"
                   >
-                    <div className="flex items-start justify-between gap-3">
-                      <h3 className="font-semibold">
-                        {project.title}
-                      </h3>
+                    <div className="mb-5 flex items-center justify-between">
+                      <span className="text-2xl">💻</span>
 
-                      <span className="shrink-0 rounded-md bg-violet-500/10 px-2 py-1 text-xs text-violet-300">
+                      <span className="rounded-full bg-violet-500/10 px-3 py-1 text-xs text-violet-300">
                         {project.difficulty}
                       </span>
                     </div>
+
+                    <h3 className="text-lg font-bold">
+                      {project.title}
+                    </h3>
 
                     <p className="mt-3 text-sm leading-6 text-gray-400">
                       {project.description}
                     </p>
 
                     <div className="mt-5 flex flex-wrap gap-2">
-                      {project.skills.map((skill, skillIndex) => (
+                      {project.skills?.map((skill, skillIndex) => (
                         <span
                           key={`${skill}-${skillIndex}`}
-                          className="rounded-md bg-white/5 px-2 py-1 text-xs text-gray-400"
+                          className="rounded-lg bg-white/5 px-3 py-1.5 text-xs text-gray-400"
                         >
                           {skill}
                         </span>
@@ -708,19 +750,114 @@ export default function DashboardPage() {
                 ))}
               </div>
             ) : (
-              <EmptyState
-                title="No projects available"
-                description="Generate your AI analysis to receive project recommendations."
-                buttonText="Generate Projects"
-                href="/analyze"
-              />
+              <div className="rounded-3xl border border-white/10 bg-[#11111b] p-8">
+                <EmptyState
+                  title="No projects yet"
+                  description="Your AI analysis will recommend projects based on your career goals."
+                  buttonText="Get Project Ideas"
+                  href="/analyze"
+                />
+              </div>
             )}
           </section>
 
-          <footer className="border-t border-white/10 py-6 text-center text-xs text-gray-600">
-            DevPath AI · Build skills. Track progress. Grow your career.
+          {/* ACTIVITY HISTORY */}
+
+          <section
+            id="activity"
+            className="mb-10 rounded-3xl border border-white/10 bg-[#11111b] p-6 sm:p-8"
+          >
+            <h2 className="text-xl font-bold">
+              Activity History
+            </h2>
+            
+            <p className="mb-7 mt-1 text-sm text-gray-500">
+              Your recent learning activities
+            </p>
+
+            {profile.activityHistory.length > 0 ? (
+              <div className="space-y-5">
+                {profile.activityHistory.map((activity, index) => (
+                  <div
+                    key={`${activity.timestamp}-${index}`}
+                    className="flex items-start gap-4"
+                  >
+                    <div
+                      className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl ${
+                        activity.type === "completed"
+                          ? "bg-green-500/10 text-green-400"
+                          : "bg-orange-500/10 text-orange-400"
+                      }`}
+                    >
+                      {activity.type === "completed" ? "✓" : "↻"}
+                    </div>
+
+                    <div className="min-w-0 flex-1">
+                      <p className="text-sm text-gray-300">
+                        {activity.description}
+                      </p>
+
+                      <p className="mt-1 text-xs text-gray-600">
+                        {new Date(activity.timestamp).toLocaleString()}
+                      </p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="rounded-2xl border border-dashed border-white/10 p-8 text-center">
+                <p className="text-sm text-gray-400">
+                  Your activity will appear here when you complete tasks.
+                </p>
+              </div>
+            )}
+          </section>
+
+          {/* PROFILE */}
+
+          <section className="mb-10 rounded-3xl border border-white/10 bg-[#11111b] p-6 sm:p-8">
+            <h2 className="text-xl font-bold">
+              Developer Profile
+            </h2>
+
+            <p className="mb-6 mt-1 text-sm text-gray-500">
+              Your current learning preferences
+            </p>
+
+            <div className="grid gap-5 sm:grid-cols-2">
+              <ProfileItem
+                label="Email"
+                value={userEmail || "Not available"}
+              />
+
+              <ProfileItem
+                label="Experience Level"
+                value={profile.level}
+              />
+
+              <ProfileItem
+                label="Career Goal"
+                value={profile.goal}
+              />
+
+              <ProfileItem
+                label="Main Interest"
+                value={profile.interest}
+              />
+            </div>
+
+            <Link
+              href="/analyze"
+              className="mt-7 inline-flex rounded-xl border border-violet-500/30 px-5 py-3 text-sm text-violet-300 transition hover:bg-violet-500/10"
+            >
+              Update My Profile →
+            </Link>
+          </section>
+
+          <footer className="border-t border-white/10 py-8 text-center text-xs text-gray-600">
+            DevPath AI © 2026 — Built for your growth.
           </footer>
-        </section>
+        </div>
       </div>
     </main>
   );
@@ -729,22 +866,41 @@ export default function DashboardPage() {
 function StatCard({
   title,
   value,
-  description,
+  subtitle,
+  icon,
 }: {
   title: string;
-  value: string | number;
-  description: string;
+  value: string;
+  subtitle: string;
+  icon: string;
 }) {
   return (
-    <div className="rounded-2xl border border-white/10 bg-[#11111a] p-5">
-      <p className="text-sm text-gray-400">{title}</p>
+    <div className="rounded-2xl border border-white/10 bg-[#11111b] p-5 transition hover:border-violet-500/30">
+      <div className="mb-5 flex items-center justify-between">
+        <p className="text-sm text-gray-400">{title}</p>
+        <span className="text-xl">{icon}</span>
+      </div>
 
-      <p className="mt-3 text-3xl font-bold text-white">
+      <p className="text-3xl font-bold">{value}</p>
+
+      <p className="mt-2 text-xs text-gray-500">{subtitle}</p>
+    </div>
+  );
+}
+
+function ProfileItem({
+  label,
+  value,
+}: {
+  label: string;
+  value: string;
+}) {
+  return (
+    <div className="rounded-2xl border border-white/10 bg-white/[0.02] p-5">
+      <p className="mb-2 text-xs text-gray-500">{label}</p>
+
+      <p className="break-words text-sm font-medium text-gray-200">
         {value}
-      </p>
-
-      <p className="mt-2 text-xs text-gray-500">
-        {description}
       </p>
     </div>
   );
@@ -762,19 +918,20 @@ function EmptyState({
   href: string;
 }) {
   return (
-    <div className="mt-6 rounded-2xl border border-dashed border-white/10 bg-[#11111a] px-6 py-12 text-center">
+    <div className="py-8 text-center">
+      <div className="mb-4 text-4xl">🚀</div>
+
       <h3 className="text-lg font-semibold">{title}</h3>
 
       <p className="mx-auto mt-2 max-w-md text-sm leading-6 text-gray-500">
         {description}
       </p>
-
       <Link
         href={href}
-        className="mt-6 inline-flex rounded-xl bg-violet-600 px-5 py-3 text-sm font-semibold transition hover:bg-violet-500"
+        className="mt-5 inline-flex rounded-xl bg-violet-600 px-5 py-3 text-sm font-semibold transition hover:bg-violet-500"
       >
         {buttonText}
-      </Link>
+      </Link> 
     </div>
   );
 }
