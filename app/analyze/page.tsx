@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useState, type FormEvent } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase";
@@ -406,12 +407,15 @@ export default function AnalyzePage() {
   return (
     <main className="min-h-screen bg-[#09090f] px-5 py-10 text-white sm:px-8 sm:py-16">
       <div className="mx-auto max-w-6xl">
-        <a
-          href="/"
-          className="text-sm text-violet-400 hover:text-violet-300"
-        >
-          ← Back to Home
-        </a>
+        <nav className="flex flex-wrap items-center justify-between gap-4">
+          <Link href="/" className="text-sm text-gray-400 transition hover:text-white">
+          ← Home
+          </Link>
+
+          <Link href="/dashboard" className="rounded-xl border border-violet-500/40 bg-violet-500/10 px-5 py-2.5 text-sm font-semibold text-violet-300 transition hover:border-violet-400 hover:bg-violet-500/20">
+            Dashboard →
+          </Link>
+        </nav>
 
         <header className="mb-10 mt-8">
           <span className="text-sm font-semibold tracking-[0.2em] text-violet-400">
